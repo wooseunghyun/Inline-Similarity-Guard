@@ -2,8 +2,7 @@
   "model_id": "sec-embed-ko",
   "version": "local-build-1",
   "created_at": "LOCAL",
-  "base_url": "https://2dtfinaltrackbsa.blob.core.windows.net/word-embedding-out/",
-  "vocab_size": 2757,
+  "vocab_size": 3194,
   "dim": 64,
   "tokenizer_version": "bpe-1",
   "thresholds": {
@@ -13,28 +12,28 @@
   "files": {
     "tokenizer": {
       "path": "tokenizer.json",
-      "sha256": "dadbb99253f411d575e370b5abd8b29f4dae30ad4b672fe25f3835f32da76c11",
-      "bytes": 89008
+      "sha256": "7a63eb12c3cc7749bcdc23a764f7496435483764b9ca0e8d55f5885bff54c2ce",
+      "bytes": 101171
     },
     "vocab": {
       "path": "vocab.json",
-      "sha256": "375a66720aa44a4bef56030b40510797a1eecfdd85d88494e00eda85aba215b1",
-      "bytes": 62362
+      "sha256": "d805497a4fe6672d60df9e4484533c22714b75c05057dc2a33fd111e5e6c393e",
+      "bytes": 72899
     },
     "idf": {
       "path": "idf.json",
-      "sha256": "972dfcb1c956b2a3b58d451cb0304667b3a7489b072b188e63cd046f32c93e7f",
-      "bytes": 100435
+      "sha256": "24c4f7da40e0af5e7664027a2351916ce723aa6e0dd32f40ea262483bb1def27",
+      "bytes": 115703
     },
     "emb": {
       "path": "emb.bin",
-      "sha256": "abd76de6a06382102dd5cfaa8021a1cc8c907baf687f105dfe26f7b85187c316",
-      "bytes": 705792
+      "sha256": "ef1cdc8a370d3c20923e4b938f8fb4982226e330c56f51a247be031d94ba1162",
+      "bytes": 817664
     },
     "anchors": {
       "path": "anchors.json",
-      "sha256": "2327e939b6c6272d032875457c83f47dfb93af9e51df08177ea03708a60cfb76",
-      "bytes": 538368
+      "sha256": "f45e96f03f1e955e511a02a8d289c9dd324270928dd2888331bcc7a5e3a45a03",
+      "bytes": 1016042
     }
   }
 }

@@ -1,4 +1,4 @@
-import os, re, json, math, struct, hashlib
+import os, re, json, math, struct, hashlib, random
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -22,7 +22,10 @@ ANCHORS_PER_CLASS = 120     # 클래스당 앵커 수(청크)
 CHUNK_CHARS = 350           # 한 앵커 텍스트 길이(문자 수 기준)
 SEED = 42
 
-CLASSES = ["극비", "기밀", "대외비"]
+# POS(민감), NEG(일반) 구분을 위해 명시
+SENSITIVE_CLASSES = ["극비", "기밀", "대외비"]
+NEGATIVE_CLASS = "일반"
+CLASSES = SENSITIVE_CLASSES + [NEGATIVE_CLASS]
 
 # -----------------------------
 # Utilities
@@ -50,12 +53,8 @@ def split_into_chunks(text: str, chunk_chars: int):
 
 # -----------------------------
 # 1) Minimal BPE Trainer (toy but workable for MVP)
-# - Start from char-level tokens
-# - Learn merges by frequency
 # -----------------------------
 def bpe_train(texts, target_vocab_size=20000, num_merges=18000):
-    # Represent each "word" as list of chars + </w>
-    # For Korean, splitting by whitespace is ok for initial; BPE will handle variants.
     vocab = Counter()
     for t in texts:
         for w in t.split():
@@ -76,7 +75,7 @@ def bpe_train(texts, target_vocab_size=20000, num_merges=18000):
             break
         (a, b), _ = pairs.most_common(1)[0]
         merges.append([a, b])
-        # merge pair a b -> ab
+
         new_vocab = Counter()
         ab = a + b
         for word, freq in vocab.items():
@@ -92,20 +91,17 @@ def bpe_train(texts, target_vocab_size=20000, num_merges=18000):
             new_vocab[tuple(new_word)] += freq
         vocab = new_vocab
 
-        # crude stop: estimate vocab size
         symbols = set()
         for w in vocab:
             symbols.update(w)
         if len(symbols) >= target_vocab_size:
             break
 
-    # Build final symbol set
     symbols = Counter()
     for word, freq in vocab.items():
         for s in word:
             symbols[s] += freq
 
-    # Reserve special tokens
     special = ["[UNK]"]
     most_common = [s for s, _ in symbols.most_common(target_vocab_size - len(special))]
     final_vocab = special + most_common
@@ -121,7 +117,6 @@ def bpe_train(texts, target_vocab_size=20000, num_merges=18000):
     return tok, vocab_map
 
 def bpe_encode_word(word, tokenizer, vocab_map):
-    # char-level + </w> then apply merges in order
     tokens = list(word) + [tokenizer["end_of_word"]]
     merges = tokenizer["merges"]
     for a, b in merges:
@@ -136,9 +131,7 @@ def bpe_encode_word(word, tokenizer, vocab_map):
                 new_tokens.append(tokens[i])
                 i += 1
         tokens = new_tokens
-    # remove </w>
     tokens = [t for t in tokens if t != tokenizer["end_of_word"]]
-    # map OOV -> [UNK]
     return [t if t in vocab_map else tokenizer["unk_token"] for t in tokens]
 
 def bpe_encode_text(text, tokenizer, vocab_map):
@@ -149,15 +142,16 @@ def bpe_encode_text(text, tokenizer, vocab_map):
 
 # -----------------------------
 # 2) Labeling (MVP)
-# - If filename includes class keyword, use it
-# - else fallback: keyword heuristic
 # -----------------------------
 def infer_class_from_filename_or_text(fname: str, text: str) -> str:
+    # 1) 파일명에 클래스가 들어가면 그걸 최우선
     for c in CLASSES:
         if c in fname:
             return c
-    # heuristic keywords (데모용)
+
+    # 2) heuristic keywords (데모용)
     rules = {
+        "일반": ["일반", "FAQ", "SLA", "운영", "고객지원", "응답", "안내", "공지", "문의", "템플릿"],
         "극비": ["극비", "비닉", "최상위", "핵심기술", "무기체계", "추진", "엔진", "방호설계"],
         "기밀": ["기밀", "계약", "도면", "설계", "가이드라인", "사양", "시험", "성능"],
         "대외비": ["대외비", "입찰", "제안", "인프라", "협력사", "견적", "공문", "회의"]
@@ -167,7 +161,7 @@ def infer_class_from_filename_or_text(fname: str, text: str) -> str:
         for kw in kws:
             if kw in fname or kw in text:
                 score[c] += 1
-    # default
+
     best = max(score.items(), key=lambda x: x[1])[0]
     return best
 
@@ -199,18 +193,17 @@ def compute_doc_vec(tokens, w2v, idf, dim):
         for i in range(dim):
             num[i] += w * float(v[i])
         denom += w
+
     if denom <= 1e-12:
         return [0.0] * dim
-    # normalize
+
     vec = [x / denom for x in num]
     norm = math.sqrt(sum(x*x for x in vec)) + 1e-12
-    vec = [x / norm for x in vec]
-    return vec
+    return [x / norm for x in vec]
 
 def write_emb_bin(vocab_map, w2v, dim, out_path: Path):
     V = len(vocab_map)
     arr = bytearray()
-    # index -> token
     inv = [None] * V
     for tok, idx in vocab_map.items():
         inv[idx] = tok
@@ -225,9 +218,9 @@ def write_emb_bin(vocab_map, w2v, dim, out_path: Path):
     return bytes(arr)
 
 def main():
+    random.seed(SEED)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # load texts
     files = sorted(CORPUS_DIR.glob("*.txt"))
     if not files:
         raise SystemExit("corpus/*.txt 가 없습니다.")
@@ -242,13 +235,16 @@ def main():
         raw_docs.append(txt)
         meta.append({"file": fp.name, "class": cls})
 
-    # chunk for training
+    # chunk for training + anchors 후보
     chunks = []
     chunk_meta = []
     for doc, m in zip(raw_docs, meta):
         for ch in split_into_chunks(doc, CHUNK_CHARS):
             chunks.append(ch)
-            chunk_meta.append({"class": m["class"], "src": m["file"]})
+            chunk_meta.append({
+                "class": m["class"],
+                "src": m["file"]
+            })
 
     # train tokenizer + vocab
     tokenizer, vocab_map = bpe_train(chunks, target_vocab_size=VOCAB_SIZE)
@@ -265,7 +261,7 @@ def main():
         window=WINDOW,
         min_count=MIN_COUNT,
         negative=NEGATIVE,
-        sg=1,        # skip-gram
+        sg=1,
         workers=4,
         epochs=EPOCHS
     )
@@ -275,27 +271,43 @@ def main():
     (OUT_DIR / "idf.json").write_text(json.dumps(idf, ensure_ascii=False), encoding="utf-8")
 
     # anchors (vectorize chunk)
-    anchors = []
     per_class = defaultdict(list)
     for ch, m, toks in zip(chunks, chunk_meta, token_seqs):
         vec = compute_doc_vec(toks, w2v, idf, DIM)
-        per_class[m["class"]].append((vec, m["src"]))
+        per_class[m["class"]].append({
+            "src": m["src"],
+            "text": ch,
+            "vec": vec
+        })
 
-    # sample anchors per class (deterministic-ish by order)
+    # 샘플 편향 줄이기: 클래스별 셔플 후 상위 N개
+    anchors = []
     for cls in CLASSES:
         items = per_class.get(cls, [])
         if not items:
             continue
-        for i, (vec, src) in enumerate(items[:ANCHORS_PER_CLASS]):
+        random.shuffle(items)
+
+        group = "NEG" if cls == NEGATIVE_CLASS else "POS"
+        for i, it in enumerate(items[:ANCHORS_PER_CLASS]):
             anchors.append({
-                "anchor_id": f"{cls[0]}-{i:03d}",
+                "anchor_id": f"{cls}-{i:03d}",
                 "class": cls,
-                "title": f"{src}",
-                "vec": vec
+                "group": group,           # POS(민감) / NEG(일반)
+                "title": it["src"],       # 파일명
+                "text": it["text"],       # ✅ 비교 대상 텍스트(청크 원문)
+                "vec": it["vec"]          # 임베딩 벡터
             })
 
-    anchors_obj = {"anchors": anchors}
-    (OUT_DIR / "anchors.json").write_text(json.dumps(anchors_obj, ensure_ascii=False), encoding="utf-8")
+    anchors_obj = {
+        "anchors": anchors,
+        "schema_version": 2,
+        "note": "Anchors include both sensitive(POS) and general(NEG) chunks."
+    }
+    (OUT_DIR / "anchors.json").write_text(
+        json.dumps(anchors_obj, ensure_ascii=False),
+        encoding="utf-8"
+    )
 
     # emb.bin
     emb_bytes = write_emb_bin(vocab_map, w2v, DIM, OUT_DIR / "emb.bin")
@@ -313,8 +325,12 @@ def main():
         "vocab_size": len(vocab_map),
         "dim": DIM,
         "tokenizer_version": tokenizer["version"],
-        # 기본 임계치(데모용): 나중에 검증셋으로 튜닝 권장
-        "thresholds": {"HIGH": 0.72, "MED": 0.60},
+        "thresholds": {
+            "HIGH_POS": 0.72,
+            "MED_POS": 0.60,
+            "HIGH_MARGIN": 0.12,
+            "MED_MARGIN": 0.06
+        },
         "files": {
             "tokenizer": file_info("tokenizer.json"),
             "vocab": file_info("vocab.json"),
@@ -323,9 +339,14 @@ def main():
             "anchors": file_info("anchors.json")
         }
     }
-    (OUT_DIR / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    (OUT_DIR / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
 
     print("DONE. out/ 에 산출물 생성 완료")
+    print(f"- anchors.json anchors: {len(anchors)}")
+    print(f"- classes: {CLASSES}")
 
 if __name__ == "__main__":
     main()

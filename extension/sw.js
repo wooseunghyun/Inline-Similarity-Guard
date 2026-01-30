@@ -3,7 +3,7 @@ import { bpeEncodeText } from "./tokenizer_bpe.js";
 import { dot, normalize } from "./vec.js";
 
 // ===== 설정 =====
-const MODEL_BASE = "https://2dtfinaltrackbsa.blob.core.windows.net/word-embedding-out/"; // out/를 올려둔 경로(끝에 /)
+const MODEL_BASE = "https://2dtfinaltrackbsa.blob.core.windows.net/word-embedding-out/"; // 끝에 /
 const MANIFEST_URL = MODEL_BASE + "manifest.json";
 
 // ===== 런타임 캐시(메모리) =====
@@ -22,6 +22,13 @@ async function fetchJson(url) {
   return await res.json();
 }
 
+async function fetchArrayBuffer(url) {
+  const res = await fetch(url, { cache: "no-store" });
+  console.log("[Guard] fetchArrayBuffer", url, res.status);
+  if (!res.ok) throw new Error("fetch failed: " + url + " status=" + res.status);
+  return await res.arrayBuffer();
+}
+
 async function fetchText(url) {
   const res = await fetch(url, { cache: "no-store" });
   console.log("[Guard] fetchText", url, res.status);
@@ -29,86 +36,6 @@ async function fetchText(url) {
   return await res.text();
 }
 
-async function fetchBytes(url) {
-  const res = await fetch(url, { cache: "no-store" });
-  console.log("[Guard] fetchBytes", url, res.status);
-  if (!res.ok) throw new Error("fetch failed: " + url + " status=" + res.status);
-  return await res.arrayBuffer();
-}
-
-// ===== 정규화/룰/스트리핑 =====
-function normalizeText(s) {
-  return (s || "")
-    .normalize("NFKC")
-    .replace(/[\u200B-\u200D\uFEFF]/g, "") // zero-width
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function stripSecurityLabels(s) {
-  const t = normalizeText(s);
-
-  const reWords =
-    /(극\s*비|기\s*밀|대\s*외\s*비|top\s*secret|confidential|internal\s*use\s*only)/gi;
-
-  const reBracketed =
-    /[\[({【「『<＜]\s*(극\s*비|기\s*밀|대\s*외\s*비|top\s*secret|confidential|internal\s*use\s*only)\s*[\])}】」』>＞]/gi;
-
-  const reHeading =
-    /(^|\n)\s*(극\s*비|기\s*밀|대\s*외\s*비|top\s*secret|confidential|internal\s*use\s*only)\s*[:\-—–]/gim;
-
-  let out = t.replace(reBracketed, " ");
-  out = out.replace(reHeading, "\n");
-  out = out.replace(reWords, " ");
-  out = out.replace(/\s+/g, " ").trim();
-  return out;
-}
-
-function applyLabelRules(rawText) {
-  const t = normalizeText(rawText);
-
-  const hit = {
-    hasLabel: false,
-    label: null,
-    boostScore: 0,    // 룰이 제공하는 score 바이어스(작게)
-    minLevel: null,   // 최소 보장 레벨
-    reasons: []
-  };
-
-  // NOTE:
-  // - "극비" 단독은 HIGH로 올리지 않습니다(과잉경고 방지)
-  // - 최소 MED + 작은 score bias만 제공합니다.
-  const rules = [
-    { label: "극비", re: /(^|[^가-힣A-Za-z0-9])극\s*비([^가-힣A-Za-z0-9]|$)/i, boostScore: 0.15, minLevel: "MED" },
-    { label: "기밀", re: /(^|[^가-힣A-Za-z0-9])기\s*밀([^가-힣A-Za-z0-9]|$)/i, boostScore: 0.10, minLevel: "MED" },
-    { label: "대외비", re: /(^|[^가-힣A-Za-z0-9])대\s*외\s*비([^가-힣A-Za-z0-9]|$)/i, boostScore: 0.08, minLevel: "MED" },
-
-    { label: "극비", re: /\btop\s*secret\b/i, boostScore: 0.15, minLevel: "MED" },
-    { label: "기밀", re: /\bconfidential\b/i, boostScore: 0.10, minLevel: "MED" },
-    { label: "대외비", re: /\binternal\s*use\s*only\b/i, boostScore: 0.08, minLevel: "MED" }
-  ];
-
-  for (const r of rules) {
-    if (r.re.test(t)) {
-      hit.hasLabel = true;
-      hit.label = hit.label || r.label;
-      hit.boostScore = Math.max(hit.boostScore, r.boostScore);
-      hit.minLevel = hit.minLevel || r.minLevel;
-      hit.reasons.push(`label:${r.label}`);
-    }
-  }
-
-  return hit;
-}
-
-function combineScores(ruleBoost, embScore) {
-  const r = Math.min(Math.max(ruleBoost, 0), 1);
-  const e = Math.min(Math.max(embScore, 0), 1);
-  // 1 - (1-r)(1-e): 과도하게 1.0에 붙지 않게 하면서 결합
-  return 1 - (1 - r) * (1 - e);
-}
-
-// ===== 모델 로드(IDB) =====
 async function loadModelFromIDB() {
   const meta = await idbGet("meta", "current");
   if (!meta) return null;
@@ -122,11 +49,17 @@ async function loadModelFromIDB() {
   if (!tok || !vocab || !idf || !anchorsObj || !embBuf) return null;
 
   const dim = meta.dim;
-  const thresholds = meta.thresholds;
+  const thresholds = meta.thresholds || {};
+  const anchorsRaw = anchorsObj.anchors || [];
 
-  const anchors = anchorsObj.anchors.map(a => ({
-    ...a,
-    vec: a.vec // server에서 정규화되어 있다고 가정(아니면 여기서 normalize 가능)
+  // ✅ anchors schema v2: {anchor_id,class,group,title,text,vec}
+  const anchors = anchorsRaw.map(a => ({
+    anchor_id: a.anchor_id,
+    class: a.class,
+    group: a.group || (a.class === "일반" ? "NEG" : "POS"),
+    title: a.title || "",
+    text: a.text || "",
+    vec: a.vec
   }));
 
   return {
@@ -180,9 +113,38 @@ function topK(arr, k, keyFn) {
   return out.slice(0, k);
 }
 
-function riskLevel(score, thresholds) {
-  if (score >= thresholds.HIGH) return "HIGH";
-  if (score >= thresholds.MED) return "MED";
+// ===== 룰 분리: 등급 키워드는 별도 체크 =====
+// (등급 단어가 들어갔다고 해서 "내용 유출"은 아닐 수 있으니,
+//  이건 rule_hit로만 표시하고, 임베딩 입력에서 제거(옵션))
+const CLASS_WORDS = ["극비", "기밀", "대외비"];
+function detectClassWords(text) {
+  const hits = [];
+  for (const w of CLASS_WORDS) {
+    if (text.includes(w)) hits.push(w);
+  }
+  return hits;
+}
+
+function stripClassWords(text) {
+  // 너무 과격하게 지우면 문장이 망가질 수 있으니, 단순 치환만
+  let t = text;
+  for (const w of CLASS_WORDS) t = t.split(w).join(" ");
+  return t;
+}
+
+// ===== 위험도 계산 (POS vs NEG, margin 기반) =====
+// 기본값: (나중에 검증셋으로 튜닝 권장)
+function riskLevelFromScores(posMax, margin, thresholds) {
+  // thresholds에 margin 기반이 있으면 우선 사용
+  const t = thresholds || {};
+  const HIGH_POS = t.HIGH_POS ?? t.HIGH ?? 0.72;
+  const MED_POS  = t.MED_POS  ?? t.MED  ?? 0.60;
+  const HIGH_MARGIN = t.HIGH_MARGIN ?? 0.12;
+  const MED_MARGIN  = t.MED_MARGIN  ?? 0.06;
+
+  // "민감으로 강하게 붙고" + "일반보다 확실히 더 민감" 이면 HIGH
+  if (posMax >= HIGH_POS && margin >= HIGH_MARGIN) return "HIGH";
+  if (posMax >= MED_POS && margin >= MED_MARGIN) return "MED";
   return "LOW";
 }
 
@@ -193,10 +155,9 @@ async function ensureModelLoaded() {
   return model;
 }
 
-// ===== 모델 업데이트 =====
+// ----- 모델 업데이트 -----
 async function updateModelIfNeeded() {
   console.log("[Guard] fetching manifest:", MANIFEST_URL);
-
   const remote = await fetchJson(MANIFEST_URL);
   const localMeta = await idbGet("meta", "current");
 
@@ -206,19 +167,18 @@ async function updateModelIfNeeded() {
 
   const files = remote.files;
 
-  // ✅ 올바른 방식: 원본 bytes로 해시(텍스트는 text로 받아 그대로 인코딩)
+  // ✅ 원본 텍스트 bytes 기준 해시
   const tokText = await fetchText(MODEL_BASE + files.tokenizer.path);
   const vocabText = await fetchText(MODEL_BASE + files.vocab.path);
   const idfText = await fetchText(MODEL_BASE + files.idf.path);
   const anchorsText = await fetchText(MODEL_BASE + files.anchors.path);
-  const embBuf = await fetchBytes(MODEL_BASE + files.emb.path);
+  const embBuf = await fetchArrayBuffer(MODEL_BASE + files.emb.path);
 
   const tokBuf = new TextEncoder().encode(tokText);
   const vocabBuf = new TextEncoder().encode(vocabText);
   const idfBuf = new TextEncoder().encode(idfText);
   const anchorsBuf = new TextEncoder().encode(anchorsText);
 
-  // verify
   const tokHash = await sha256Hex(tokBuf.buffer);
   const vocabHash = await sha256Hex(vocabBuf.buffer);
   const idfHash = await sha256Hex(idfBuf.buffer);
@@ -231,7 +191,7 @@ async function updateModelIfNeeded() {
   if (anchorsHash !== files.anchors.sha256) throw new Error("anchors hash mismatch");
   if (embHash !== files.emb.sha256) throw new Error("emb hash mismatch");
 
-  // save JSON objects + emb buffer (중복 fetch 제거)
+  // save JSON objects + emb buffer
   await idbPut("files", "tokenizer.json", JSON.parse(tokText));
   await idbPut("files", "vocab.json", JSON.parse(vocabText));
   await idbPut("files", "idf.json", JSON.parse(idfText));
@@ -242,7 +202,7 @@ async function updateModelIfNeeded() {
     version: remote.version,
     vocab_size: remote.vocab_size,
     dim: remote.dim,
-    thresholds: remote.thresholds
+    thresholds: remote.thresholds || {}
   });
 
   model = null; // reload
@@ -252,96 +212,107 @@ async function updateModelIfNeeded() {
 // alarms: 하루 1회 업데이트 체크
 chrome.runtime.onInstalled.addListener(async () => {
   chrome.alarms.create("model_update", { periodInMinutes: 60 * 24 });
-  try {
-    await updateModelIfNeeded();
-  } catch (e) {
-    console.error("[Guard] updateModelIfNeeded failed:", e);
-  }
+  try { await updateModelIfNeeded(); } catch (e) { console.error("[Guard] updateModelIfNeeded failed:", e); }
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== "model_update") return;
-  try {
-    await updateModelIfNeeded();
-  } catch (e) {
-    console.error("[Guard] updateModelIfNeeded failed:", e);
-  }
+  try { await updateModelIfNeeded(); } catch (e) { console.error("[Guard] updateModelIfNeeded failed:", e); }
 });
+
+// ===== 핵심: POS/NEG 둘 다 비교해서 위험도 계산 =====
+function scoreAgainstAnchors(docVec, anchors) {
+  const scored = anchors.map(a => ({
+    group: a.group || (a.class === "일반" ? "NEG" : "POS"),
+    class: a.class,
+    anchor_id: a.anchor_id,
+    title: a.title,
+    text: a.text || "",
+    sim: dot(docVec, a.vec)
+  }));
+
+  const pos = scored.filter(x => x.group === "POS");
+  const neg = scored.filter(x => x.group === "NEG");
+
+  const topPos = topK(pos, 3, x => x.sim);
+  const topNeg = topK(neg, 3, x => x.sim);
+
+  const posMax = topPos.length ? topPos[0].sim : 0;
+  const negMax = topNeg.length ? topNeg[0].sim : 0;
+  const margin = posMax - negMax;
+
+  return { topPos, topNeg, posMax, negMax, margin };
+}
 
 // 메시지 처리: content.js -> sw
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
-    // ---- 모델 강제 갱신 ----
-    if (msg.type === "UPDATE_MODEL_NOW") {
-      try {
-        const r = await updateModelIfNeeded();
-        sendResponse({ ok: true, ...r });
-      } catch (e) {
-        console.error("[Guard] UPDATE_MODEL_NOW failed:", e);
-        sendResponse({ ok: false, error: String(e?.message || e) });
-      }
-      return;
-    }
+    try {
+      if (msg.type === "CHECK_TEXT") {
+        const m = await ensureModelLoaded();
+        if (!m) {
+          sendResponse({ ok: false, error: "MODEL_NOT_READY" });
+          return;
+        }
 
-    // ---- 텍스트 검사 ----
-    if (msg.type === "CHECK_TEXT") {
-      const m = await ensureModelLoaded();
-      if (!m) {
-        sendResponse({ ok: false, error: "MODEL_NOT_READY" });
+        const rawText = (msg.text || "");
+        const ruleHits = detectClassWords(rawText);
+
+        // ✅ 등급 단어는 룰로 분리, 임베딩 입력에서는 제거(원하던 의도)
+        const embedText = stripClassWords(rawText);
+
+        const tokens = bpeEncodeText(embedText, m.tok, m.vocab);
+        const docVec = computeDocVec(tokens, m.vocab, m.idf, m.dim, m.embView);
+
+        const { topPos, topNeg, posMax, negMax, margin } = scoreAgainstAnchors(docVec, m.anchors);
+        const level = riskLevelFromScores(posMax, margin, m.thresholds);
+
+        // UI에 보여줄 top matches는 POS 위주로(민감 후보)
+        const topMatches = topPos.map(x => ({
+          class: x.class,
+          anchor_id: x.anchor_id,
+          title: x.title,
+          sim: x.sim,
+          // ✅ “어떤 내용이랑 비슷한지”를 보여주려면 text가 필요
+          text_preview: (x.text || "").slice(0, 160)
+        }));
+
+        sendResponse({
+          ok: true,
+          // 점수는 posMax를 기본 risk_score로 쓰되, margin도 같이 제공
+          risk_score: posMax,
+          risk_level: level,
+
+          pos_max: posMax,
+          neg_max: negMax,
+          margin: margin,
+
+          rule_hits: ruleHits,     // 등급 키워드 발견 여부(룰 기반)
+          top_matches: topMatches,
+
+          // 디버깅용: NEG도 보고 싶으면 UI에서 활용 가능
+          top_neg_matches: topNeg.map(x => ({
+            class: x.class,
+            anchor_id: x.anchor_id,
+            title: x.title,
+            sim: x.sim,
+            text_preview: (x.text || "").slice(0, 120)
+          }))
+        });
         return;
       }
 
-      const rawText = msg.text || "";
+      if (msg.type === "UPDATE_MODEL_NOW") {
+        const r = await updateModelIfNeeded();
+        sendResponse({ ok: true, ...r });
+        return;
+      }
 
-      // 1) 룰: 등급 단어는 여기서만 반영
-      const ruleHit = applyLabelRules(rawText);
-
-      // 2) 임베딩용 텍스트: 등급 표식 제거
-      const contentText = stripSecurityLabels(rawText);
-
-      // 3) 토큰화/임베딩은 “내용”으로만
-      const tokens = bpeEncodeText(contentText, m.tok, m.vocab);
-
-      // 디버깅 필요하면 아래 주석 해제
-      // console.log("TEXT(raw):", rawText);
-      // console.log("TEXT(content):", contentText);
-      // console.log("TOKENS sample:", tokens.slice(0, 50));
-      // console.log("Known token count:", tokens.filter(t => m.vocab[t] !== undefined).length);
-
-      const docVec = computeDocVec(tokens, m.vocab, m.idf, m.dim, m.embView);
-
-      const scored = m.anchors.map(a => ({
-        class: a.class,
-        anchor_id: a.anchor_id,
-        title: a.title,
-        sim: dot(docVec, a.vec)
-      }));
-
-      const topMatches = topK(scored, 3, x => x.sim);
-      const embScore = topMatches.length ? topMatches[0].sim : 0;
-
-      // 4) 점수 결합(룰 + 임베딩)
-      const finalScore = combineScores(ruleHit.boostScore, embScore);
-
-      // 5) 레벨 결정 + 룰 최소 레벨 보장
-      let level = riskLevel(finalScore, m.thresholds);
-      if (ruleHit.minLevel === "MED" && level === "LOW") level = "MED";
-
-      sendResponse({
-        ok: true,
-        risk_score: finalScore,
-        risk_level: level,
-        emb_score: embScore,
-        rule_boost: ruleHit.boostScore,
-        reasons: ruleHit.reasons,
-        top_matches: topMatches,
-        // 디버깅용(원하면 UI에서 숨기거나 제거)
-        content_text: contentText
-      });
-      return;
+      sendResponse({ ok: false, error: "UNKNOWN_MSG" });
+    } catch (e) {
+      console.error("[Guard] handler error:", e);
+      sendResponse({ ok: false, error: String(e?.message || e) });
     }
-
-    sendResponse({ ok: false, error: "UNKNOWN_MSG" });
   })();
 
   return true; // async response
