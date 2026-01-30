@@ -1,0 +1,40 @@
+{
+  "model_id": "sec-embed-ko",
+  "version": "local-build-1",
+  "created_at": "LOCAL",
+  "base_url": "https://2dtfinaltrackbsa.blob.core.windows.net/word-embedding-out/",
+  "vocab_size": 2757,
+  "dim": 64,
+  "tokenizer_version": "bpe-1",
+  "thresholds": {
+    "HIGH": 0.72,
+    "MED": 0.6
+  },
+  "files": {
+    "tokenizer": {
+      "path": "tokenizer.json",
+      "sha256": "dadbb99253f411d575e370b5abd8b29f4dae30ad4b672fe25f3835f32da76c11",
+      "bytes": 89008
+    },
+    "vocab": {
+      "path": "vocab.json",
+      "sha256": "375a66720aa44a4bef56030b40510797a1eecfdd85d88494e00eda85aba215b1",
+      "bytes": 62362
+    },
+    "idf": {
+      "path": "idf.json",
+      "sha256": "972dfcb1c956b2a3b58d451cb0304667b3a7489b072b188e63cd046f32c93e7f",
+      "bytes": 100435
+    },
+    "emb": {
+      "path": "emb.bin",
+      "sha256": "abd76de6a06382102dd5cfaa8021a1cc8c907baf687f105dfe26f7b85187c316",
+      "bytes": 705792
+    },
+    "anchors": {
+      "path": "anchors.json",
+      "sha256": "2327e939b6c6272d032875457c83f47dfb93af9e51df08177ea03708a60cfb76",
+      "bytes": 538368
+    }
+  }
+}

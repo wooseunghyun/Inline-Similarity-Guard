@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Inline Similarity Guard (Demo)",
+  "version": "0.1.0",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": ["<all_urls>", "https://2dtfinaltrackbsa.blob.core.windows.net/*"],
+  "background": { "service_worker": "sw.js", "type": "module" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": { "default_title": "Guard" }
+}
