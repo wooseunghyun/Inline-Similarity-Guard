@@ -1,1 +1,51 @@
-/.venv
+# ======================
+# Python
+# ======================
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# ======================
+# Environment / Secrets
+# ======================
+.env
+.env.*
+
+# ======================
+# OS
+# ======================
+.DS_Store
+Thumbs.db
+
+# ======================
+# IDE / Editor
+# ======================
+.vscode/
+.idea/
+
+# ======================
+# Build / Generated
+# ======================
+out/
+*.log
+
+# ======================
+# Node / Extension
+# ======================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ======================
+# Chrome Extension
+# ======================
+extension/dist/
+extension/.cache/
+extension/*.zip
+
+# ======================
+# Jupyter (혹시 쓸 경우)
+# ======================
+.ipynb_checkpoints/
